@@ -1,0 +1,36 @@
+# Build output -- the project compiles ggml itself, so this is large.
+build/
+cmake-build-*/
+laya-infer
+
+# Model weights and everything else derived from a checkpoint. Generate them
+# (convert_laya_gguf.py) or copy them from the checkpoint; don't commit them.
+*.gguf
+*.json
+# the specific ones, for reference:
+#   rl_agent_config.json   training config shipped with the checkpoint
+#   slot_schema.json       this repo's own worked example
+#   tokenizer.json         ~33 MB vocabulary
+rl_agent_config.json
+slot_schema.json
+tokenizer.json
+
+# ...but examples/ holds hand-written presets that do belong in the repo.
+!examples/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local experiment data / logs
+data/
+out/
+logs/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
