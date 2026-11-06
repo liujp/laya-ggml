@@ -256,16 +256,31 @@ static struct laya_model * load_model(const char * path) {
     m->enc = calloc(m->n_layers, sizeof(struct laya_enc_layer));
     m->head = calloc(m->head_layers, sizeof(struct laya_head_layer));
 
+    /* LAYA_NATIVE_DTYPE=1 keeps the 2-D weights in the file's own dtype
+     * (f16 / q8_0) instead of expanding them to f32 on load. It halves the
+     * resident memory, but measured ~12% slower on Zen4: that CPU has no
+     * native FP16 arithmetic (no avx512_fp16), so ggml converts on every
+     * mul_mat and the extra conversion costs more than the saved bandwidth.
+     * Off by default -- enable it when memory matters more than latency. */
+    const int native_dtype = getenv("LAYA_NATIVE_DTYPE") != NULL;
+
     /* Phase 1: Create tensor metadata and map to model struct */
     for (uint64_t i = 0; i < n_tensors; i++) {
         struct tensor_info * ti = &tinfo[i];
-        /* Quantized weights are expanded to f32 on load. The graph mixes
-         * activations with f32 norms and biases, and ggml rejects mixed-type
-         * elementwise ops -- an f16 model used to abort inside ggml_mul. This
-         * keeps one dtype throughout: the file stays small, memory does not. */
+        /* Only the 1-D tensors (norm weights, biases) take part in elementwise
+         * ops (ggml_mul / ggml_add), and ggml rejects mixed-type elementwise --
+         * an all-f16 model used to abort inside ggml_mul. Those stay f32.
+         *
+         * The 2-D weights only feed mul_mat, where ggml natively supports
+         * f16 / q8_0 weights against f32 activations (see the
+         * src0==F16 / src1==F32 asserts in ggml's mul_mat). Keeping them in the
+         * file's dtype halves the resident memory and the bandwidth per forward,
+         * instead of expanding everything to f32 on load. */
         enum ggml_type gtype = (enum ggml_type)ti->dtype;
-        enum ggml_type wtype = (gtype == GGML_TYPE_F16 || gtype == GGML_TYPE_Q8_0)
-                               ? GGML_TYPE_F32 : gtype;
+        enum ggml_type wtype = gtype;
+        if ((gtype == GGML_TYPE_F16 || gtype == GGML_TYPE_Q8_0) &&
+            (!native_dtype || ti->ndim == 1))
+            wtype = GGML_TYPE_F32;
 
         struct ggml_tensor * t;
         if (ti->ndim == 1)
@@ -342,7 +357,11 @@ static struct laya_model * load_model(const char * path) {
             enum ggml_type src_type = (enum ggml_type)tinfo[ti_idx].dtype;
             int64_t n = ggml_nelements(t);
 
-            if (src_type == GGML_TYPE_F16) {
+            if (t->type == src_type) {
+                /* 2-D weights kept in the file's dtype (f16 / q8_0): raw copy. */
+                ggml_backend_tensor_set(t, src, 0, ggml_nbytes(t));
+            } else if (src_type == GGML_TYPE_F16) {
+                /* 1-D norms / biases: expand f16 -> f32 for the elementwise ops. */
                 const ggml_fp16_t * h = (const ggml_fp16_t *)src;
                 float * tmp = (float *)malloc((size_t)n * sizeof(float));
                 for (int64_t j = 0; j < n; j++) tmp[j] = ggml_fp16_to_fp32(h[j]);
